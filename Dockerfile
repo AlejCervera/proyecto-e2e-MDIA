@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 2º el código (cambia a menudo, por eso va después)
-COPY renfe_collector.py storage.py ./
+COPY renfe_collector.py storage.py geo.py ./
 COPY samples/ samples/
 
 # Valores por defecto de la configuración (se sobrescriben con `docker run -e`)

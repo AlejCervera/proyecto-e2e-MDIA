@@ -12,7 +12,7 @@
 | 2 | Dockerizar el colector | ✅ Completada |
 | 3 | Almacenamiento SQL con Docker Compose | ✅ Completada |
 | 4 | Ejecución automática con `docker compose up` | ✅ Completada |
-| 5 | Backend FastAPI | ⏳ Pendiente |
+| 5 | Backend FastAPI | ✅ Completada |
 | 6 | Frontend | ⏳ Pendiente |
 
 ## Estructura del repositorio
@@ -21,6 +21,13 @@
 proyecto-e2e-MDIA/
 ├── renfe_collector.py        # Colector: descarga, parseo, validación, distancias y alertas
 ├── storage.py                # Persistencia en PostgreSQL (posiciones y alertas)
+├── geo.py                    # Haversine, compartida por colector y backend
+├── backend/                  # API FastAPI (contenedor propio)
+│   ├── main.py               # Endpoints
+│   ├── schemas.py            # Modelos Pydantic de las respuestas
+│   ├── db.py                 # Consultas a PostgreSQL
+│   ├── requirements.txt
+│   └── Dockerfile
 ├── make_sample.py            # Genera la muestra anonimizada a partir de una captura real
 ├── db/
 │   └── init.sql              # Esquema SQL: tablas e índices
@@ -48,7 +55,11 @@ copy .env.example .env      # y cambia POSTGRES_PASSWORD
 docker compose up --build
 ```
 
-Esto levanta PostgreSQL, crea el esquema, espera a que la base de datos esté lista y arranca el colector, que empieza a guardar posiciones y alertas cada 15 s. Los detalles están en [Fases 2-4](#fases-2-4-docker-y-postgresql).
+Esto levanta PostgreSQL, crea el esquema, espera a que la base de datos esté lista y arranca el colector (que guarda posiciones y alertas cada 15 s) y el backend.
+
+- API y Swagger: <http://localhost:8000/docs>
+
+Los detalles están en [Fases 2-4](#fases-2-4-docker-y-postgresql) y [Fase 5](#fase-5-backend-fastapi).
 
 ---
 
@@ -81,6 +92,7 @@ Variables de entorno (ver [.env.example](.env.example)):
 | `ALERT_DISTANCE_METERS` | `1000` | Umbral en metros. Se genera alerta si dos trenes están a una distancia **estrictamente menor**. |
 | `POLL_INTERVAL_SECONDS` | `15` | Segundos entre lecturas. **Mínimo 15**: si se indica un valor menor, se fuerza a 15 porque la fuente se actualiza cada ~15 s. |
 | `FEED_FILE` | *(vacía)* | Si se define, se lee este fichero JSON en lugar de llamar a la API. |
+| `ALERT_IGNORE_BOTH_STOPPED` | `true` | Si es `true`, no se genera alerta cuando los dos trenes están parados. `false` aplica la regla estricta del enunciado. Ver [Cálculo de alertas](#cálculo-de-alertas). |
 
 > El colector lee las variables del entorno del sistema; **no lee el fichero `.env` por sí mismo**. El `.env` lo usará Docker Compose en fases posteriores. En local se definen en la terminal (ver ejemplos abajo).
 
@@ -221,6 +233,7 @@ docker run --rm -it -e FEED_FILE=samples/vehicle_positions_sample.json renfe-col
 |---|---|
 | `db` | PostgreSQL 17. En el primer arranque ejecuta [db/init.sql](db/init.sql). Tiene un *healthcheck* con `pg_isready`. |
 | `collector` | Se construye con el `Dockerfile`. `depends_on: condition: service_healthy` hace que **no arranque hasta que la BD acepte conexiones**. |
+| `backend` | API FastAPI (Fase 5) en el puerto 8000. También espera a la BD. |
 | volumen `pgdata` | Guarda los datos de PostgreSQL. Sobreviven a `docker compose down`. |
 
 Ambos servicios tienen `restart: unless-stopped`.
@@ -293,6 +306,69 @@ Definido en [db/init.sql](db/init.sql).
 - Si la base de datos falla, se registra el error, se descarta la conexión y se reintenta en la siguiente lectura. El colector no se detiene.
 
 Verificado: procesar dos veces la misma muestra inserta 155 posiciones y 7 alertas la primera vez, y 0 y 0 la segunda.
+
+---
+
+## Fase 5: backend FastAPI
+
+Servicio `backend` en [docker-compose.yml](docker-compose.yml), publicado en el puerto **8000**. Solo lee de la base de datos: el navegador nunca se conecta a SQL ni ve credenciales.
+
+- **Swagger (documentación interactiva):** <http://localhost:8000/docs>
+- Esquema OpenAPI: <http://localhost:8000/openapi.json>
+
+### Endpoints
+
+| Método y ruta | Descripción | Errores |
+|---|---|---|
+| `GET /getAlertas?limit=50&order=desc` | Alertas registradas. `limit` entre 1 y 1000; `order` `desc` (más recientes primero, por defecto) o `asc`. | `422` si los parámetros no son válidos |
+| `GET /getTren/{id}` | Datos y posición más reciente del tren, con `age_seconds` (antigüedad de la posición). | `404` si el tren no existe |
+| `GET /getDistancia/{trenId1}/{trenId2}` | Distancia Haversine actual en metros entre las posiciones más recientes de ambos trenes, junto con esas posiciones. | `400` mismo tren; `404` alguno no existe; `409` alguna posición no es reciente |
+| `GET /getTrenes?max_age_seconds=120` | *(extra, para el mapa)* Posición más reciente de cada tren activo. | |
+| `GET /health` | Estado del servicio y de la conexión a la BD. | `503` si la BD no responde |
+
+Cualquier error de base de datos en cualquier endpoint devuelve **`503 Base de datos no disponible`**, gracias a un manejador global de excepciones de `psycopg`.
+
+### Decisiones
+
+- **Modelos Pydantic** ([backend/schemas.py](backend/schemas.py)) para todas las respuestas: FastAPI valida la salida y genera la documentación de Swagger a partir de ellos.
+- **"Posición reciente"** = recibida por el colector hace menos de `MAX_POSITION_AGE_SECONDS` (120 s por defecto, configurable en `.env`). Se usa `received_at` y no `position_timestamp` porque el timestamp de Renfe lleva un desfase fijo (ver limitaciones).
+- **`409 Conflict`** cuando una posición es antigua: el tren existe, pero su dato no sirve para calcular una distancia "actual".
+- **Parámetro `order`** validado con `Literal["desc", "asc"]` y traducido con una lista blanca a `DESC`/`ASC`. Nunca se inserta texto del usuario en el SQL; los valores van siempre como parámetros (`%s`).
+- **Haversine compartida:** [geo.py](geo.py) la usan el colector y el backend, sin duplicar código.
+- **Conexión por petición** (`psycopg.connect` en cada consulta): es simple y suficiente para este volumen. Con más tráfico se usaría un *pool* de conexiones.
+- **CORS** habilitado (solo `GET`) para que el frontend pueda llamar a la API desde el navegador. Orígenes configurables con `CORS_ORIGINS`.
+- **Healthcheck** en Compose sobre `/health`.
+
+### Ejemplos
+
+```powershell
+curl "http://localhost:8000/getAlertas?limit=2"
+curl "http://localhost:8000/getTren/00192"
+curl "http://localhost:8000/getDistancia/00192/00194"
+```
+
+```json
+{
+  "id": 973,
+  "train_a": "03192", "train_b": "03305",
+  "lat_a": 41.3437,  "lon_a": 2.0562563,
+  "lat_b": 41.34197, "lon_b": 2.056309,
+  "distance_m": 192.4, "threshold_m": 1000.0,
+  "same_stop": false, "both_stopped": false,
+  "position_timestamp": "2026-11-12T17:01:20Z",
+  "detected_at": "2026-11-12T18:01:22.898404Z"
+}
+```
+
+### Pruebas realizadas
+
+| Caso | Resultado |
+|---|---|
+| `/health`, `/getAlertas`, `/getTrenes`, `/getTren/{id}`, `/getDistancia` | `200` con datos reales |
+| Tren inexistente | `404` |
+| Mismo tren dos veces en `/getDistancia` | `400` |
+| `limit=0` u `order=xyz` | `422` con el detalle de validación |
+| Base de datos parada | `503`. Al volver la BD, backend y colector se recuperan solos |
 
 ---
 
@@ -369,7 +445,11 @@ Un mismo tren físico aparece varias veces en una lectura, una por cada `tripId`
   - el enunciado pide comparar cada tren con todos los demás;
   - `stopId` es la *próxima parada*, no la vía: dos trenes de frente en la misma vía tienen paradas distintas, y dos trenes que llegan a una estación desde lados opuestos comparten parada;
   - con los datos reales, **6 de las 7 alertas a 1000 m eran entre trenes con `stopId` distinto**, incluidos pares a 0 m.
-- **Contexto en lugar de filtro:** cada alerta incluye `same_stop` y `both_stopped` para que la capa de visualización pueda distinguir, por ejemplo, "trenes parados en la misma estación" de "trenes en marcha cerca". Se guardan todos los datos y se filtra al consultar.
+- **Contexto:** cada alerta incluye `same_stop` y `both_stopped` para que la capa de visualización pueda distinguir, por ejemplo, "trenes parados en la misma estación" de "trenes en marcha cerca".
+- **Pares de trenes parados (`ALERT_IGNORE_BOTH_STOPPED`, activado por defecto):** si los **dos** trenes están `STOPPED_AT`, no se genera alerta.
+  - *Motivo:* era la principal fuente de ruido. En los datos reales, la mayoría de alertas eran trenes parados en el mismo punto (0 m), con toda probabilidad en una estación o acoplados, y se repetían en cada lectura. Con la muestra de referencia, las alertas bajan de 7 a 2.
+  - *Desviación del enunciado:* añade una condición a la regla "alerta si distancia < umbral". Con `ALERT_IGNORE_BOTH_STOPPED=false` se recupera la regla estricta sin tocar código.
+  - *Coste:* también se descartan dos trenes parados cerca fuera de una estación (por ejemplo, detenidos en plena vía). Si solo uno de los dos está parado, la alerta **sí** se genera.
 
 ### Muestra anonimizada
 
@@ -391,7 +471,7 @@ python make_sample.py data/<captura>.json samples/vehicle_positions_sample.json
 
 - **No hay ruta ni línea** (`routeId`) en el feed. El campo se omite.
 - **No hay timestamp por vehículo**, solo uno común en la cabecera.
-- **Retraso:** el `header.timestamp` puede ir por detrás de la hora real de recepción.
+- **Desfase del timestamp de Renfe:** `header.timestamp` va sistemáticamente **~1 hora por detrás** de la hora de recepción (por ejemplo, posición `17:01:20Z` recibida a las `18:01:22Z`). Lo más probable es que la fuente codifique la hora local española como si fuera UTC. Por eso la "antigüedad" de una posición se calcula con `received_at`.
 - **Trenes distintos en coordenadas idénticas.** Varios pares con `vehicle_id` diferente aparecen exactamente en el mismo punto (distancia 0,0 m). Probablemente sean composiciones acopladas o trenes parados con la coordenada de la estación. Generan alertas que no indican ninguna situación anómala.
 - **La mayoría de alertas son trenes en estaciones:** en la captura de referencia, 5 de las 7 alertas a 1000 m eran entre dos trenes `STOPPED_AT`.
 - **Un mismo `vehicle_id` en dos posiciones distintas** dentro de la misma lectura. Observado en datos reales con unos 30 km de separación. Se conserva la última posición y se emite un aviso.

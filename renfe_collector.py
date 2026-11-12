@@ -1,16 +1,14 @@
 from datetime import datetime, timezone
-from math import radians, sin, cos, asin, sqrt
 import requests
-import os 
+import os
 from itertools import combinations
 import json
 import signal
 import sys
-
 import storage
+from geo import haversine_m 
 
 FEED_URL = "https://gtfsrt.renfe.com/vehicle_positions_LD.json"
-EARTH_RADIUS_M = 6_371_000
 
 # VARIABLES DE ENTORNO
 
@@ -18,17 +16,8 @@ ALERT_DISTANCE_METERS = float(os.getenv("ALERT_DISTANCE_METERS", "1000"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
 POLL_INTERVAL_SECONDS = max(POLL_INTERVAL_SECONDS, 15)  # nunca más rápido que el feed
 FEED_FILE = os.getenv("FEED_FILE")  # si se define, se lee este fichero en vez de la API
-
-# DISTANCIA ENTRE DOS PUNTOS
-
-def haversine_m(lat1, lon1, lat2, lon2):
-    """Distancia en metros entre dos puntos (lat, lon) expresados en grados."""
-    phi1, phi2 = radians(lat1), radians(lat2)
-    dphi = radians(lat2 - lat1)
-    dlambda = radians(lon2 - lon1)
-
-    a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlambda / 2) ** 2
-    return 2 * EARTH_RADIUS_M * asin(sqrt(a))
+# Si es true, no se genera alerta cuando los DOS trenes están parados (STOPPED_AT)
+ALERT_IGNORE_BOTH_STOPPED = os.getenv("ALERT_IGNORE_BOTH_STOPPED", "true").lower() in ("1", "true", "yes")
 
 # NOS CONECTAMOS A LA API
 
@@ -130,13 +119,20 @@ def parse_feed(feed, received_at):
 
     return list(trains.values())
 
-def find_alerts(trains, threshold_m):
-    """Devuelve una lista de alertas para cada par de trenes a menos de threshold_m metros."""
+def find_alerts(trains, threshold_m, ignore_both_stopped=False):
+    """Devuelve una lista de alertas para cada par de trenes a menos de threshold_m metros.
+
+    Si ignore_both_stopped es True, se descartan los pares en los que ambos trenes están parados.
+    """
     alerts = []
     for a, b in combinations(trains, 2):
         distance = haversine_m(a["latitude"], a["longitude"], b["latitude"], b["longitude"])
 
         if distance < threshold_m:
+            both_stopped = a["status"] == "STOPPED_AT" and b["status"] == "STOPPED_AT"
+            if ignore_both_stopped and both_stopped:
+                continue  # dos trenes parados (p. ej. en una estación): no es alerta
+
             # Orden canónico del par (A < B): así la BD puede deduplicar A-B / B-A
             if a["vehicle_id"] > b["vehicle_id"]:
                 a, b = b, a
@@ -152,7 +148,7 @@ def find_alerts(trains, threshold_m):
                 "position_timestamp": a["position_timestamp"],
                 "detected_at": a["received_at"],
                 "same_stop": a["stop_id"] is not None and a["stop_id"] == b["stop_id"],
-                "both_stopped": a["status"] == "STOPPED_AT" and b["status"] == "STOPPED_AT"
+                "both_stopped": both_stopped,
             })
     return alerts
 
@@ -167,7 +163,7 @@ def run_once(threshold_m):
     received_at = datetime.now(timezone.utc)
 
     trains = parse_feed(feed, received_at)
-    alerts = find_alerts(trains, threshold_m)
+    alerts = find_alerts(trains, threshold_m, ALERT_IGNORE_BOTH_STOPPED)
 
     print(f"\n[{received_at:%Y-%m-%d %H:%M:%S} UTC] {len(trains)} trenes, {len(alerts)} alertas")
 
@@ -195,7 +191,8 @@ if __name__ == "__main__":
     # `docker stop` envía SIGTERM: lo tratamos igual que Ctrl+C para parar limpio
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
-    print(f"Colector iniciado: umbral {ALERT_DISTANCE_METERS} m, cada {POLL_INTERVAL_SECONDS} s")
+    print(f"Colector iniciado: umbral {ALERT_DISTANCE_METERS} m, cada {POLL_INTERVAL_SECONDS} s, "
+          f"ignorar pares parados: {'sí' if ALERT_IGNORE_BOTH_STOPPED else 'no'}")
     print(f"Base de datos: {'activada (' + storage.DB_HOST + ')' if storage.is_enabled() else 'desactivada'}")
     print("Pulsa Ctrl+C para detener.")
     try:

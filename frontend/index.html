@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trenes en directo</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside id="panel">
+    <header>
+      <h1>Trenes en directo</h1>
+      <p class="sub">Renfe · Alta Velocidad, Larga y Media Distancia</p>
+    </header>
+
+    <div id="status" class="status status--loading">Conectando…</div>
+
+    <section class="stats">
+      <div><span id="stat-total">–</span><small>trenes</small></div>
+      <div><span id="stat-moving">–</span><small>en marcha</small></div>
+      <div><span id="stat-stopped">–</span><small>parados</small></div>
+    </section>
+
+    <section class="legend">
+      <span><i class="dot dot--moving"></i>En marcha</span>
+      <span><i class="dot dot--stopped"></i>Parado</span>
+      <span><i class="dot dot--alert"></i>En alerta</span>
+    </section>
+
+    <section class="alerts">
+      <h2>Alertas recientes <span id="alert-count" class="badge">0</span></h2>
+      <ul id="alert-list"><li class="empty">Sin alertas en este momento</li></ul>
+    </section>
+
+    <footer>
+      Datos operativos orientativos, con posible retraso o imprecisión GPS.
+      <strong>No es un sistema de seguridad ferroviaria.</strong>
+    </footer>
+  </aside>
+
+  <main id="map"></main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

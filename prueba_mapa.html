@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Prueba: trenes en el mapa</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    html, body, #map { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #info { position: absolute; top: 10px; right: 10px; z-index: 1000; background: #fff;
+            padding: 8px 12px; border-radius: 6px; box-shadow: 0 1px 4px #0003; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="info">Cargando…</div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // PRUEBA MÍNIMA: pide /getTrenes al backend cada 15 s y mueve los trenes suavemente.
+    const API = "http://localhost:8000";
+    const CADA_MS = 15000;
+
+    const map = L.map("map", { preferCanvas: true }).setView([40.2, -3.7], 6);
+    // Teselas de CARTO (basadas en OpenStreetMap). Las de tile.openstreetmap.org
+    // bloquean las páginas abiertas como fichero local (403 "Access blocked").
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+      attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+      subdomains: "abcd", maxZoom: 19,
+    }).addTo(map);
+
+    const trenes = {};  // vehicle_id -> { marker, desde, hasta, inicio }
+
+    async function actualizar() {
+      try {
+        const lista = await (await fetch(API + "/getTrenes")).json();
+        for (const t of lista) {
+          const destino = [t.latitude, t.longitude];
+          const color = t.status === "STOPPED_AT" ? "gray" : "blue";
+          let tren = trenes[t.vehicle_id];
+          if (!tren) {
+            const marker = L.circleMarker(destino, { radius: 6, color, fillOpacity: 0.9 }).addTo(map);
+            tren = trenes[t.vehicle_id] = { marker, desde: destino, hasta: destino, inicio: 0 };
+          } else {
+            const p = tren.marker.getLatLng();
+            tren.desde = [p.lat, p.lng];   // desde donde está ahora...
+            tren.hasta = destino;           // ...hasta la posición nueva
+            tren.inicio = performance.now();
+            tren.marker.setStyle({ color });
+          }
+          tren.marker.bindTooltip(`Tren ${t.vehicle_id}<br>${t.status}`);
+        }
+        document.getElementById("info").textContent =
+          `${lista.length} trenes · ${new Date().toLocaleTimeString("es-ES")}`;
+      } catch (e) {
+        document.getElementById("info").textContent = "Backend no disponible: " + e.message;
+      }
+    }
+
+    // Cada fotograma, mueve cada tren un poco entre "desde" y "hasta" (interpolación lineal)
+    function animar(ahora) {
+      for (const tren of Object.values(trenes)) {
+        const k = Math.min(1, (ahora - tren.inicio) / CADA_MS);
+        tren.marker.setLatLng([
+          tren.desde[0] + (tren.hasta[0] - tren.desde[0]) * k,
+          tren.desde[1] + (tren.hasta[1] - tren.desde[1]) * k,
+        ]);
+      }
+      requestAnimationFrame(animar);
+    }
+
+    actualizar();
+    setInterval(actualizar, CADA_MS);
+    requestAnimationFrame(animar);
+  </script>
+</body>
+</html>

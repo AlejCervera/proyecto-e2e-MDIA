@@ -30,12 +30,37 @@ services:
     environment:
       ALERT_DISTANCE_METERS: ${ALERT_DISTANCE_METERS:-1000}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-15}
+      ALERT_IGNORE_BOTH_STOPPED: ${ALERT_IGNORE_BOTH_STOPPED:-true}
       FEED_FILE: ${FEED_FILE:-}
       DB_HOST: db                    # nombre del servicio = nombre de host en la red de Compose
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB}
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
+    restart: unless-stopped
+
+  # Backend FastAPI: expone los datos de la BD al frontend. Swagger en http://localhost:8000/docs
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      MAX_POSITION_AGE_SECONDS: ${MAX_POSITION_AGE_SECONDS:-120}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 volumes:

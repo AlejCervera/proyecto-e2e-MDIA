@@ -4,6 +4,10 @@ import requests
 import os 
 from itertools import combinations
 import json
+import signal
+import sys
+
+import storage
 
 FEED_URL = "https://gtfsrt.renfe.com/vehicle_positions_LD.json"
 EARTH_RADIUS_M = 6_371_000
@@ -88,6 +92,7 @@ def parse_entity(entity):
         "status": vehicle_block.get("currentStatus"),       # currentStatus
         "latitude": lat,
         "longitude": lon,
+        "raw": entity,   # entidad original, se guarda en raw_payload (JSONB)
     }
 
 def parse_feed(feed, received_at):
@@ -132,6 +137,9 @@ def find_alerts(trains, threshold_m):
         distance = haversine_m(a["latitude"], a["longitude"], b["latitude"], b["longitude"])
 
         if distance < threshold_m:
+            # Orden canónico del par (A < B): así la BD puede deduplicar A-B / B-A
+            if a["vehicle_id"] > b["vehicle_id"]:
+                a, b = b, a
             alerts.append({
                 "train_a": a["vehicle_id"],
                 "lat_a": a["latitude"],
@@ -174,18 +182,29 @@ def run_once(threshold_m):
         print(f"  ALERTA: {a['train_a']} ↔ {a['train_b']} a {a['distance_m']} m "
               f"(umbral {a['threshold_m']} m)")
 
-# PROBAMOS SU CONEXION
+    if storage.is_enabled():
+        result = storage.save_reading(trains, alerts)
+        if result is not None:
+            print(f"  BD: {result[0]} posiciones y {result[1]} alertas nuevas guardadas")
+
+# BUCLE PRINCIPAL
 
 if __name__ == "__main__":
     import time
 
+    # `docker stop` envía SIGTERM: lo tratamos igual que Ctrl+C para parar limpio
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+
     print(f"Colector iniciado: umbral {ALERT_DISTANCE_METERS} m, cada {POLL_INTERVAL_SECONDS} s")
+    print(f"Base de datos: {'activada (' + storage.DB_HOST + ')' if storage.is_enabled() else 'desactivada'}")
     print("Pulsa Ctrl+C para detener.")
     try:
         while True:
             run_once(ALERT_DISTANCE_METERS)
             time.sleep(POLL_INTERVAL_SECONDS)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         print("\nColector detenido.")
+    finally:
+        storage.close()
 
 

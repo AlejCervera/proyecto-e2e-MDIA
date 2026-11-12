@@ -1,0 +1,42 @@
+# Levanta toda la solución con:  docker compose up --build
+# Los valores ${...} se leen del fichero .env (ver .env.example)
+
+services:
+
+  # Base de datos PostgreSQL
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data              # persistencia de los datos
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro   # esquema inicial
+    healthcheck:
+      # "lista" = acepta conexiones. El colector espera a que esto sea verdad.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Colector: lee el feed, calcula alertas y guarda todo en la BD
+  collector:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy   # no arranca hasta que la BD esté lista
+    environment:
+      ALERT_DISTANCE_METERS: ${ALERT_DISTANCE_METERS:-1000}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-15}
+      FEED_FILE: ${FEED_FILE:-}
+      DB_HOST: db                    # nombre del servicio = nombre de host en la red de Compose
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    restart: unless-stopped
+
+volumes:
+  pgdata:

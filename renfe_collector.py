@@ -49,11 +49,46 @@ def parse_entity(entity):
     return {
         "vehicle_id": vehicle_id,
         "trip_id": trip.get("tripId"),     # sácalo de trip (puede faltar → None)
-        "stop_id": vehicle_block.get("stopID"),      # sácalo de vehicle_block
+        "stop_id": vehicle_block.get("stopId"),      # sácalo de vehicle_block
         "status": vehicle_block.get("currentStatus"),       # currentStatus
         "latitude": lat,
         "longitude": lon,
     }
+
+def parse_feed(feed, received_at):
+    """Devuelve una lista de trenes limpios y sin duplicados (uno por vehicle_id)."""
+    trains = {}
+    header = feed.get("header") or {}
+    raw_ts = header.get("timestamp")
+
+    # si raw_ts es None → position_timestamp = None
+    # si no → convertirlo a datetime UTC (ya lo hiciste en el primer ejercicio)
+
+    if raw_ts is None:
+        position_timestamp = None
+    else:
+        position_timestamp = datetime.fromtimestamp(int(raw_ts), tz = timezone.utc) 
+
+    for entity in feed.get("entity") or []:
+
+        train = parse_entity(entity)
+        # si train es None, saltar a la siguiente entidad
+        if train is None:
+            continue
+
+        vid = train["vehicle_id"]
+        # si vid ya está en trains Y (su lat es distinta O su lon es distinta)
+        # → print(f"AVISO: ...") indicando el id y las dos posiciones
+        if vid in trains and (train["latitude"] != trains[vid]["latitude"] or train["longitude"] != trains[vid]["longitude"]):
+            print(f"AVISO: tren {vid} duplicado con posiciones distintas: "
+                  f"({trains[vid]['latitude']}, {trains[vid]['longitude']}) vs "
+                  f"({train['latitude']}, {train['longitude']})")
+
+        train["position_timestamp"] = position_timestamp
+        train["received_at"] = received_at
+        trains[vid] = train
+
+    return list(trains.values())
 
 # PROBAMOS SU CONEXION
 
@@ -62,9 +97,8 @@ if __name__ == "__main__":
     with open("data/vehicle_positions_LD.json", encoding="utf-8") as f:
         feed = json.load(f)
 
-    for entity in feed["entity"][:5]:
-        print(parse_entity(entity))
+    received_at = datetime.now(timezone.utc)
+    trains = parse_feed(feed, received_at)
 
-    print(parse_entity({}))
-    print(parse_entity({"vehicle": {"vehicle": {"id": "X"}, "position": {"latitude": 95, "longitude": 2}}}))
-    print(parse_entity({"vehicle": {"vehicle": {"id": "Y"}, "position": {"latitude": 0, "longitude": 0}}}))
+    print(f"{len(feed['entity'])} entidades → {len(trains)} trenes únicos")
+    print(trains[0])
